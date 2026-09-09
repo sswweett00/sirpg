@@ -8,6 +8,14 @@
 
 namespace sirpg::components {
 
+// Game State Enum
+enum class GameState {
+    MainMenu,
+    Playing,
+    GameOver,
+    Victory
+};
+
 // 1. Transform Component
 struct TransformComponent {
     glm::vec2 position{0.0f, 0.0f};
@@ -55,6 +63,7 @@ struct PlayerComponent {
     bool wantJump{false};
     bool wantAttack{false};
     bool wantFireball{false};
+    bool wantStart{false};
 
     int jumpsRemaining{2};
     int maxJumps{2};
@@ -62,6 +71,9 @@ struct PlayerComponent {
 
     float attackCooldown{0.0f};
     float fireballCooldown{0.0f};
+    int score{0};
+    int coinsCollected{0};
+    int enemiesDefeated{0};
 };
 
 // 7. Stats Component (RPG Attributes)
@@ -72,6 +84,7 @@ struct StatsComponent {
     float maxMp{50.0f};
     int level{1};
     float exp{0.0f};
+    float maxExp{100.0f};
     float attackPower{20.0f};
     float moveSpeed{180.0f};
 };
@@ -153,7 +166,20 @@ struct ParallaxComponent {
     glm::vec2 baseOffset{0.0f, 0.0f};
 };
 
-// 14. Floating Damage Text Pool Structure
+// 14. Collectible Items (Coins, Gems, Health Potions)
+enum class CollectibleType {
+    Coin,
+    Gem,
+    HealthPotion
+};
+
+struct CollectibleComponent {
+    CollectibleType type{CollectibleType::Coin};
+    int value{100};
+    float floatOffset{0.0f};
+};
+
+// 15. Floating Damage Text Pool Structure
 struct FloatingText {
     glm::vec2 position{0.0f, 0.0f};
     float damageValue{0.0f};
@@ -164,7 +190,7 @@ struct FloatingText {
     char textBuffer[32]{};
 };
 
-// 15. Particle Pool Structure for FX (Zero-Allocation Particles)
+// 16. Particle Pool Structure for FX (Zero-Allocation Particles)
 struct Particle {
     glm::vec2 position{0.0f, 0.0f};
     glm::vec2 velocity{0.0f, 0.0f};

@@ -14,6 +14,7 @@
 #include "Components/Components.hpp"
 #include "Engine/TextureAtlas.hpp"
 #include "Engine/BatchedRenderer.hpp"
+#include "Engine/AudioSystem.hpp"
 #include "Systems/Systems.hpp"
 
 using namespace sirpg::core;
@@ -28,7 +29,7 @@ int main(int argc, char* argv[]) {
     Logger::init();
     LOG_INFO("Starting SIRPG Production-Ready C++23 Engine & Side-Scroller RPG...");
 
-    // Initialize SDL3
+    // Initialize SDL3 Video & Events
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         LOG_CRITICAL("Failed to initialize SDL3: {}", SDL_GetError());
         return 1;
@@ -59,11 +60,15 @@ int main(int argc, char* argv[]) {
 
     SDL_SetRenderVSync(renderer, 1);
 
+    // Audio System
+    AudioSystem audioSystem;
+    audioSystem.init();
+
     // Arena Allocator for general engine pre-allocated memory (16MB)
     ArenaAllocator engineArena(16 * 1024 * 1024);
     LOG_INFO("Engine Arena Allocator initialized with {} MB", engineArena.getCapacity() / (1024 * 1024));
 
-    // Object Pools for Zero Runtime Memory Allocations (Floating Texts & Particles)
+    // Object Pools for Zero Runtime Memory Allocations
     ObjectPool<FloatingText, 128> floatingTextPool;
     ObjectPool<Particle, 256> particlePool;
 
@@ -83,6 +88,8 @@ int main(int argc, char* argv[]) {
     BatchedRenderer batchedRenderer;
     Camera camera;
     camera.viewportSize = glm::vec2(static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+
+    GameState gameState = GameState::Playing;
 
     // =========================================================================
     // MAP & ENTITY INITIALIZATION (100x20 Tilemap World)
@@ -113,10 +120,9 @@ int main(int argc, char* argv[]) {
         for (int x = 0; x < mapWidth; ++x) {
             int tileType = 0;
 
-            // Ground floor
             if (y >= 17) {
                 tileType = 1; // Dirt / Grass
-            } else if (y == 16 && (x % 15 >= 3 && x % 15 <= 7) && x > 5) {
+            } else if (y == 16 && (x % 12 >= 3 && x % 12 <= 7) && x > 5) {
                 tileType = 2; // Stone Platform
             } else if (y == 16 && x == 25) {
                 tileType = 3; // Hazard Spikes
@@ -141,7 +147,6 @@ int main(int argc, char* argv[]) {
                 .zIndex = 0
             });
 
-            // Create Static Box2D Physics Body for Ground & Platforms
             if (tileType == 1 || tileType == 2) {
                 b2BodyDef bodyDef = b2DefaultBodyDef();
                 bodyDef.type = b2_staticBody;
@@ -159,7 +164,36 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 3. Create Player Entity
+    // 3. Create Collectible Items Across Map
+    for (int x = 10; x < 90; x += 4) {
+        auto coinEntity = registry.create();
+        glm::vec2 cPos(x * tileSize, 15.0f * tileSize);
+
+        registry.emplace<TransformComponent>(coinEntity, TransformComponent{.position = cPos, .prevPosition = cPos});
+
+        SDL_FRect srcRect{224.0f, 160.0f, 32.0f, 32.0f};
+        CollectibleType colType = CollectibleType::Coin;
+        int value = 100;
+
+        if (x % 16 == 0) {
+            colType = CollectibleType::Gem;
+            srcRect = SDL_FRect{288.0f, 160.0f, 32.0f, 32.0f};
+            value = 500;
+        } else if (x % 24 == 0) {
+            colType = CollectibleType::HealthPotion;
+            srcRect = SDL_FRect{256.0f, 160.0f, 32.0f, 32.0f};
+            value = 0;
+        }
+
+        registry.emplace<CollectibleComponent>(coinEntity, CollectibleComponent{.type = colType, .value = value});
+        registry.emplace<SpriteComponent>(coinEntity, SpriteComponent{
+            .srcRect = srcRect,
+            .color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+            .zIndex = 3
+        });
+    }
+
+    // 4. Create Player Entity
     auto playerEntity = registry.create();
     glm::vec2 playerStartPos(100.0f, 400.0f);
 
@@ -210,7 +244,7 @@ int main(int argc, char* argv[]) {
 
     registry.emplace<RigidBodyComponent>(playerEntity, RigidBodyComponent{.bodyId = playerBodyId});
 
-    // 4. Create Enemy Entities (Melee Skeleton & Ranged Wizard)
+    // 5. Create Enemy Entities (Melee Skeleton & Ranged Wizard)
     struct EnemySpawn {
         glm::vec2 pos;
         EnemyType type;
@@ -222,7 +256,8 @@ int main(int argc, char* argv[]) {
         { { 900.0f, 400.0f }, EnemyType::RangedWizard, 100.0f },
         { { 1400.0f, 400.0f }, EnemyType::MeleeSkeleton, 200.0f },
         { { 1800.0f, 400.0f }, EnemyType::RangedWizard, 150.0f },
-        { { 2300.0f, 400.0f }, EnemyType::MeleeSkeleton, 180.0f }
+        { { 2300.0f, 400.0f }, EnemyType::MeleeSkeleton, 180.0f },
+        { { 2700.0f, 400.0f }, EnemyType::RangedWizard, 120.0f }
     };
 
     for (const auto& spawn : spawns) {
@@ -279,7 +314,7 @@ int main(int argc, char* argv[]) {
         registry.emplace<RigidBodyComponent>(enemyEntity, RigidBodyComponent{.bodyId = eBodyId});
     }
 
-    LOG_INFO("World initialized successfully: 100x20 Tilemap, Player, and Enemies created.");
+    LOG_INFO("World initialized successfully: 100x20 Tilemap, Player, Collectibles, and Enemies created.");
 
     // =========================================================================
     // MAIN GAME LOOP (Fixed Timestep 60Hz + Interpolation, Zero Allocations)
@@ -295,18 +330,21 @@ int main(int argc, char* argv[]) {
         timeStep.tick();
 
         // 1. Process Input
-        quit = InputSystem::pollEvents(registry);
+        quit = InputSystem::pollEvents(registry, gameState);
 
         // 2. Fixed Timestep Physics & Game Logic Steps
         while (timeStep.checkStep()) {
             float fixedDT = timeStep.getFixedDeltaTime();
 
-            PlayerSystem::update(registry, fixedDT, particlePool);
-            AISystem::update(registry, fixedDT, physicsWorld);
-            PhysicsSystem::update(registry, physicsWorld, fixedDT);
-            CombatSystem::update(registry, fixedDT, floatingTextPool, particlePool);
-            ParticleSystem::update(particlePool, fixedDT);
-            AnimationSystem::update(registry, fixedDT);
+            if (gameState == GameState::Playing) {
+                PlayerSystem::update(registry, fixedDT, audioSystem, particlePool);
+                AISystem::update(registry, fixedDT, physicsWorld);
+                PhysicsSystem::update(registry, physicsWorld, fixedDT);
+                CollectibleSystem::update(registry, fixedDT, audioSystem, floatingTextPool, particlePool);
+                CombatSystem::update(registry, fixedDT, audioSystem, floatingTextPool, particlePool, gameState);
+                ParticleSystem::update(particlePool, fixedDT);
+                AnimationSystem::update(registry, fixedDT);
+            }
         }
 
         // 3. Smooth Camera Tracking on Player Position
@@ -322,7 +360,8 @@ int main(int argc, char* argv[]) {
             camera,
             timeStep.getAlpha(),
             floatingTextPool,
-            particlePool
+            particlePool,
+            gameState
         );
 
         frameCounter++;
@@ -346,6 +385,7 @@ int main(int argc, char* argv[]) {
     }
 
     b2DestroyWorld(physicsWorld);
+    audioSystem.shutdown();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

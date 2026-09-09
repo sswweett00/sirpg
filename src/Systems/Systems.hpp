@@ -17,6 +17,7 @@
 #include "../Core/Profiler.hpp"
 #include "../Engine/BatchedRenderer.hpp"
 #include "../Engine/TextureAtlas.hpp"
+#include "../Engine/AudioSystem.hpp"
 
 namespace sirpg::systems {
 
@@ -41,7 +42,7 @@ inline void destroyEntitySafely(entt::registry& registry, entt::entity entity) {
 // -----------------------------------------------------------------------------
 class InputSystem {
 public:
-    static bool pollEvents(entt::registry& registry) {
+    static bool pollEvents(entt::registry& registry, GameState& gameState) {
         SIRPG_PROFILE_ZONE();
         SDL_Event event;
         bool quit = false;
@@ -49,8 +50,14 @@ public:
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
                 quit = true;
-            } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.scancode == SDL_SCANCODE_ESCAPE) {
-                quit = true;
+            } else if (event.type == SDL_EVENT_KEY_DOWN) {
+                if (event.key.scancode == SDL_SCANCODE_ESCAPE) {
+                    quit = true;
+                } else if (gameState == GameState::MainMenu || gameState == GameState::GameOver || gameState == GameState::Victory) {
+                    if (event.key.scancode == SDL_SCANCODE_RETURN || event.key.scancode == SDL_SCANCODE_SPACE || event.key.scancode == SDL_SCANCODE_R) {
+                        gameState = GameState::Playing;
+                    }
+                }
             }
         }
 
@@ -65,6 +72,7 @@ public:
             player.wantJump = keyboard[SDL_SCANCODE_SPACE] || keyboard[SDL_SCANCODE_W] || keyboard[SDL_SCANCODE_UP];
             player.wantAttack = keyboard[SDL_SCANCODE_J] || keyboard[SDL_SCANCODE_Z];
             player.wantFireball = keyboard[SDL_SCANCODE_K] || keyboard[SDL_SCANCODE_X];
+            player.wantStart = keyboard[SDL_SCANCODE_RETURN];
         }
 
         return quit;
@@ -107,7 +115,6 @@ public:
 
     static void update(entt::registry& registry, b2WorldId worldId, float deltaTime) {
         SIRPG_PROFILE_ZONE();
-        // Step Box2D v3 simulation
         int subStepCount = 4;
         b2World_Step(worldId, deltaTime, subStepCount);
 
@@ -126,7 +133,6 @@ public:
                 transform.prevRotation = transform.rotation;
 
                 // Box2D center position in meters -> engine top-left sprite position in pixels
-                // Sprite size is 32x32 (half-width = 16px)
                 transform.position = glm::vec2(pos.x * 32.0f - 16.0f, pos.y * 32.0f - 16.0f);
                 transform.rotation = b2Rot_GetAngle(rot);
             }
@@ -219,7 +225,106 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 6. AI SYSTEM
+// 6. COLLECTIBLE & ITEM SYSTEM
+// -----------------------------------------------------------------------------
+class CollectibleSystem {
+public:
+    static void update(
+        entt::registry& registry,
+        float deltaTime,
+        AudioSystem& audioSystem,
+        sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool,
+        sirpg::core::ObjectPool<Particle, 256>& particlePool
+    ) {
+        SIRPG_PROFILE_ZONE();
+
+        // Animate floating collectibles
+        static float totalTime = 0.0f;
+        totalTime += deltaTime;
+
+        auto colView = registry.view<CollectibleComponent, TransformComponent>();
+        for (auto entity : colView) {
+            auto& col = colView.get<CollectibleComponent>(entity);
+            auto& transform = colView.get<TransformComponent>(entity);
+
+            col.floatOffset = std::sin(totalTime * 4.0f + transform.position.x) * 4.0f;
+        }
+
+        // Check player collision with collectibles
+        auto playerView = registry.view<PlayerComponent, TransformComponent, StatsComponent>();
+        thread_local std::vector<entt::entity> pendingCollect;
+        pendingCollect.clear();
+
+        for (auto pEntity : playerView) {
+            auto& player = playerView.get<PlayerComponent>(pEntity);
+            auto& pStats = playerView.get<StatsComponent>(pEntity);
+            auto& pTransform = playerView.get<TransformComponent>(pEntity);
+
+            for (auto cEntity : colView) {
+                auto& col = colView.get<CollectibleComponent>(cEntity);
+                auto& cTransform = colView.get<TransformComponent>(cEntity);
+
+                float dist = glm::distance(pTransform.position, cTransform.position);
+                if (dist < 30.0f) {
+                    pendingCollect.push_back(cEntity);
+
+                    if (col.type == CollectibleType::Coin) {
+                        player.score += col.value;
+                        player.coinsCollected++;
+                        audioSystem.playSound(SoundEffect::Coin);
+                        ParticleSystem::spawnBurst(particlePool, cTransform.position, glm::vec4(1.0f, 0.85f, 0.0f, 1.0f), 6);
+
+                        auto textRes = floatingTextPool.spawn();
+                        if (textRes) {
+                            FloatingText* text = textRes.value();
+                            text->position = cTransform.position + glm::vec2(0.0f, -15.0f);
+                            text->color = glm::vec4(1.0f, 0.85f, 0.0f, 1.0f);
+                            text->lifetime = 0.8f;
+                            text->elapsedTime = 0.0f;
+                            std::snprintf(text->textBuffer, sizeof(text->textBuffer), "+%d PTS", col.value);
+                        }
+                    } else if (col.type == CollectibleType::Gem) {
+                        player.score += col.value;
+                        audioSystem.playSound(SoundEffect::Coin);
+                        ParticleSystem::spawnBurst(particlePool, cTransform.position, glm::vec4(0.0f, 1.0f, 1.0f, 1.0f), 8);
+
+                        auto textRes = floatingTextPool.spawn();
+                        if (textRes) {
+                            FloatingText* text = textRes.value();
+                            text->position = cTransform.position + glm::vec2(0.0f, -15.0f);
+                            text->color = glm::vec4(0.0f, 1.0f, 1.0f, 1.0f);
+                            text->lifetime = 0.8f;
+                            text->elapsedTime = 0.0f;
+                            std::snprintf(text->textBuffer, sizeof(text->textBuffer), "+%d GEM", col.value);
+                        }
+                    } else if (col.type == CollectibleType::HealthPotion) {
+                        pStats.hp = std::min(pStats.maxHp, pStats.hp + 40.0f);
+                        pStats.mp = std::min(pStats.maxMp, pStats.mp + 20.0f);
+                        audioSystem.playSound(SoundEffect::HealthPotion);
+                        ParticleSystem::spawnBurst(particlePool, cTransform.position, glm::vec4(0.2f, 1.0f, 0.2f, 1.0f), 10);
+
+                        auto textRes = floatingTextPool.spawn();
+                        if (textRes) {
+                            FloatingText* text = textRes.value();
+                            text->position = cTransform.position + glm::vec2(0.0f, -15.0f);
+                            text->color = glm::vec4(0.2f, 1.0f, 0.2f, 1.0f);
+                            text->lifetime = 0.8f;
+                            text->elapsedTime = 0.0f;
+                            std::snprintf(text->textBuffer, sizeof(text->textBuffer), "+40 HP");
+                        }
+                    }
+                }
+            }
+        }
+
+        for (auto entity : pendingCollect) {
+            destroyEntitySafely(registry, entity);
+        }
+    }
+};
+
+// -----------------------------------------------------------------------------
+// 7. AI SYSTEM
 // -----------------------------------------------------------------------------
 class AISystem {
 public:
@@ -335,15 +440,17 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 7. COMBAT & PROJECTILE SYSTEM
+// 8. COMBAT & PROJECTILE SYSTEM
 // -----------------------------------------------------------------------------
 class CombatSystem {
 public:
     static void update(
         entt::registry& registry,
         float deltaTime,
+        AudioSystem& audioSystem,
         sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool,
-        sirpg::core::ObjectPool<Particle, 256>& particlePool
+        sirpg::core::ObjectPool<Particle, 256>& particlePool,
+        GameState& gameState
     ) {
         SIRPG_PROFILE_ZONE();
 
@@ -387,6 +494,7 @@ public:
                     float dist = glm::distance(transform.position, eTransform.position);
                     if (dist < 28.0f) { // Collision hit
                         eStats.hp -= proj.damage;
+                        audioSystem.playSound(SoundEffect::Hit);
 
                         // Particle burst on magic hit
                         ParticleSystem::spawnBurst(particlePool, eTransform.position, glm::vec4(1.0f, 0.7f, 0.1f, 1.0f), 10);
@@ -406,6 +514,26 @@ public:
                         if (eStats.hp <= 0.0f) {
                             enemyView.get<EnemyComponent>(eEntity).state = AIState::Dead;
                             pendingDestroy.push_back(eEntity);
+
+                            // Grant XP & Score to player
+                            auto pView = registry.view<PlayerComponent, StatsComponent>();
+                            for (auto pEnt : pView) {
+                                auto& player = pView.get<PlayerComponent>(pEnt);
+                                auto& pStats = pView.get<StatsComponent>(pEnt);
+                                player.score += 250;
+                                player.enemiesDefeated++;
+                                pStats.exp += 35.0f;
+
+                                if (pStats.exp >= pStats.maxExp) {
+                                    pStats.level++;
+                                    pStats.exp -= pStats.maxExp;
+                                    pStats.maxExp *= 1.25f;
+                                    pStats.maxHp += 20.0f;
+                                    pStats.hp = pStats.maxHp;
+                                    pStats.attackPower += 10.0f;
+                                    audioSystem.playSound(SoundEffect::LevelUp);
+                                }
+                            }
                         }
 
                         pendingDestroy.push_back(entity); // Destroy projectile
@@ -422,6 +550,7 @@ public:
                     float dist = glm::distance(transform.position, pTransform.position);
                     if (dist < 24.0f) {
                         pStats.hp = std::max(0.0f, pStats.hp - proj.damage);
+                        audioSystem.playSound(SoundEffect::Hit);
 
                         // Particle burst on player hit
                         ParticleSystem::spawnBurst(particlePool, pTransform.position, glm::vec4(0.8f, 0.1f, 0.8f, 1.0f), 8);
@@ -436,6 +565,10 @@ public:
                             text->lifetime = 0.8f;
                             text->elapsedTime = 0.0f;
                             std::snprintf(text->textBuffer, sizeof(text->textBuffer), "-%.0f", proj.damage);
+                        }
+
+                        if (pStats.hp <= 0.0f) {
+                            gameState = GameState::GameOver;
                         }
 
                         pendingDestroy.push_back(entity);
@@ -463,7 +596,8 @@ public:
                     float dist = glm::distance(hTransform.position, eTransform.position);
                     if (dist < 36.0f && hitbox.active) {
                         eStats.hp -= hitbox.damage;
-                        hitbox.active = false; // Only hit once per attack
+                        hitbox.active = false;
+                        audioSystem.playSound(SoundEffect::Hit);
 
                         // Particle burst on melee hit
                         ParticleSystem::spawnBurst(particlePool, eTransform.position, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f), 6);
@@ -473,7 +607,7 @@ public:
                             FloatingText* text = textRes.value();
                             text->position = eTransform.position + glm::vec2(0.0f, -20.0f);
                             text->damageValue = hitbox.damage;
-                            text->color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f); // White for melee
+                            text->color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
                             text->lifetime = 0.8f;
                             text->elapsedTime = 0.0f;
                             std::snprintf(text->textBuffer, sizeof(text->textBuffer), "-%.0f", hitbox.damage);
@@ -482,6 +616,25 @@ public:
                         if (eStats.hp <= 0.0f) {
                             enemyView.get<EnemyComponent>(eEntity).state = AIState::Dead;
                             pendingDestroy.push_back(eEntity);
+
+                            auto pView = registry.view<PlayerComponent, StatsComponent>();
+                            for (auto pEnt : pView) {
+                                auto& player = pView.get<PlayerComponent>(pEnt);
+                                auto& pStats = pView.get<StatsComponent>(pEnt);
+                                player.score += 200;
+                                player.enemiesDefeated++;
+                                pStats.exp += 30.0f;
+
+                                if (pStats.exp >= pStats.maxExp) {
+                                    pStats.level++;
+                                    pStats.exp -= pStats.maxExp;
+                                    pStats.maxExp *= 1.25f;
+                                    pStats.maxHp += 20.0f;
+                                    pStats.hp = pStats.maxHp;
+                                    pStats.attackPower += 10.0f;
+                                    audioSystem.playSound(SoundEffect::LevelUp);
+                                }
+                            }
                         }
                     }
                 }
@@ -496,6 +649,7 @@ public:
                     if (dist < 32.0f && hitbox.active) {
                         pStats.hp = std::max(0.0f, pStats.hp - hitbox.damage);
                         hitbox.active = false;
+                        audioSystem.playSound(SoundEffect::Hit);
 
                         ParticleSystem::spawnBurst(particlePool, pTransform.position, glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), 8);
 
@@ -509,12 +663,25 @@ public:
                             text->elapsedTime = 0.0f;
                             std::snprintf(text->textBuffer, sizeof(text->textBuffer), "-%.0f", hitbox.damage);
                         }
+
+                        if (pStats.hp <= 0.0f) {
+                            gameState = GameState::GameOver;
+                        }
                     }
                 }
             }
 
             if (hitbox.elapsedTime >= hitbox.lifetime) {
                 pendingDestroy.push_back(entity);
+            }
+        }
+
+        // Check Victory condition (Player reaches right end of 100x20 tilemap map, x > 3000)
+        auto pView = registry.view<PlayerComponent, TransformComponent>();
+        for (auto pEnt : pView) {
+            auto& pos = pView.get<TransformComponent>(pEnt).position;
+            if (pos.x >= 2950.0f) {
+                gameState = GameState::Victory;
             }
         }
 
@@ -526,13 +693,14 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 8. PLAYER CONTROLLER SYSTEM
+// 9. PLAYER CONTROLLER SYSTEM
 // -----------------------------------------------------------------------------
 class PlayerSystem {
 public:
     static void update(
         entt::registry& registry,
         float deltaTime,
+        AudioSystem& audioSystem,
         sirpg::core::ObjectPool<Particle, 256>& particlePool
     ) {
         SIRPG_PROFILE_ZONE();
@@ -576,6 +744,7 @@ public:
             if (player.wantJump && !prevJumpState && player.jumpsRemaining > 0) {
                 currentVel.y = -12.0f; // Impulse upward velocity
                 player.jumpsRemaining--;
+                audioSystem.playSound(SoundEffect::Jump);
 
                 // Jump Dust Particles
                 ParticleSystem::spawnBurst(particlePool, transform.position + glm::vec2(16.0f, 32.0f), glm::vec4(0.8f, 0.8f, 0.8f, 0.8f), 6);
@@ -590,6 +759,7 @@ public:
                 player.attackCooldown = 0.35f;
                 anim.row = 1; // Melee swing row
                 anim.currentFrame = 0;
+                audioSystem.playSound(SoundEffect::SwordSwing);
 
                 // Spawn melee attack hitbox entity
                 float attackDir = sprite.flipHorizontal ? -1.0f : 1.0f;
@@ -613,6 +783,7 @@ public:
             if (player.wantFireball && player.fireballCooldown <= 0.0f && stats.mp >= 10.0f) {
                 stats.mp -= 10.0f;
                 player.fireballCooldown = 0.5f;
+                audioSystem.playSound(SoundEffect::Fireball);
 
                 float projDir = sprite.flipHorizontal ? -1.0f : 1.0f;
                 auto projEntity = registry.create();
@@ -637,7 +808,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 9. RENDER SYSTEM
+// 10. RENDER SYSTEM
 // -----------------------------------------------------------------------------
 class RenderSystem {
 public:
@@ -649,7 +820,8 @@ public:
         const Camera& camera,
         float interpolationAlpha,
         sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool,
-        sirpg::core::ObjectPool<Particle, 256>& particlePool
+        sirpg::core::ObjectPool<Particle, 256>& particlePool,
+        GameState gameState
     ) {
         SIRPG_PROFILE_ZONE();
         SDL_SetRenderDrawColor(renderer, 15, 15, 30, 255); // Dark blue night background
@@ -690,16 +862,12 @@ public:
             auto& transform = tileView.get<TransformComponent>(entity);
             auto& sprite = tileView.get<SpriteComponent>(entity);
 
-            // Interpolate position
             glm::vec2 interpolatedPos = glm::mix(transform.prevPosition, transform.position, interpolationAlpha);
-
-            // World -> Screen Coordinates
             glm::vec2 screenPos = interpolatedPos - camera.position;
 
-            // Frustum Culling Check
             if (screenPos.x + 32.0f < 0 || screenPos.x > camera.viewportSize.x ||
                 screenPos.y + 32.0f < 0 || screenPos.y > camera.viewportSize.y) {
-                continue; // Skip rendering out-of-screen tiles
+                continue;
             }
 
             batchedRenderer.submitQuad(RenderQuadCommand{
@@ -711,10 +879,34 @@ public:
             });
         }
 
-        // 3. Render Game Entities (Player, Enemies, Projectiles)
+        // 3. Render Collectibles (Coins, Gems, Potions)
+        auto colView = registry.view<CollectibleComponent, TransformComponent, SpriteComponent>();
+        for (auto entity : colView) {
+            auto& col = colView.get<CollectibleComponent>(entity);
+            auto& transform = colView.get<TransformComponent>(entity);
+            auto& sprite = colView.get<SpriteComponent>(entity);
+
+            glm::vec2 screenPos = transform.position - camera.position;
+            screenPos.y += col.floatOffset;
+
+            if (screenPos.x + 32.0f < 0 || screenPos.x > camera.viewportSize.x ||
+                screenPos.y + 32.0f < 0 || screenPos.y > camera.viewportSize.y) {
+                continue;
+            }
+
+            batchedRenderer.submitQuad(RenderQuadCommand{
+                .srcRect = sprite.srcRect,
+                .dstRect = SDL_FRect{screenPos.x, screenPos.y, 24.0f, 24.0f},
+                .color = sprite.color,
+                .rotation = 0.0f,
+                .zIndex = sprite.zIndex
+            });
+        }
+
+        // 4. Render Game Entities (Player, Enemies, Projectiles)
         auto entityView = registry.view<TransformComponent, SpriteComponent>();
         for (auto entity : entityView) {
-            if (registry.all_of<TileComponent, ParallaxComponent>(entity)) continue;
+            if (registry.all_of<TileComponent, ParallaxComponent, CollectibleComponent>(entity)) continue;
 
             auto& transform = entityView.get<TransformComponent>(entity);
             auto& sprite = entityView.get<SpriteComponent>(entity);
@@ -733,7 +925,7 @@ public:
             });
         }
 
-        // 4. Render Active FX Particles
+        // 5. Render Active FX Particles
         particlePool.forEachActive([&batchedRenderer, &camera](const Particle& p) {
             glm::vec2 screenPos = p.position - camera.position;
             batchedRenderer.submitQuad(RenderQuadCommand{
@@ -748,53 +940,95 @@ public:
         // Flush Batched Quads to GPU
         batchedRenderer.flush(renderer, textureAtlas.getTexture());
 
-        // 5. Render UI / HUD (HP / MP Bars & Floating Damage Numbers)
-        // Find Player Stats
-        auto playerView = registry.view<PlayerComponent, StatsComponent>();
-        for (auto pEntity : playerView) {
-            auto& stats = playerView.get<StatsComponent>(pEntity);
+        // 6. Render HUD & UI Overlays
+        if (gameState == GameState::Playing) {
+            auto playerView = registry.view<PlayerComponent, StatsComponent>();
+            for (auto pEntity : playerView) {
+                auto& player = playerView.get<PlayerComponent>(pEntity);
+                auto& stats = playerView.get<StatsComponent>(pEntity);
 
-            // HP Bar Background
-            SDL_FRect hpBg{20.0f, 20.0f, 200.0f, 20.0f};
-            SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
-            SDL_RenderFillRect(renderer, &hpBg);
+                // HP Bar
+                SDL_FRect hpBg{20.0f, 20.0f, 200.0f, 20.0f};
+                SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
+                SDL_RenderFillRect(renderer, &hpBg);
 
-            // HP Bar Fill (Interpolated Red)
-            float hpPct = std::clamp(stats.hp / stats.maxHp, 0.0f, 1.0f);
-            SDL_FRect hpFill{20.0f, 20.0f, 200.0f * hpPct, 20.0f};
-            SDL_SetRenderDrawColor(renderer, 220, 20, 60, 255);
-            SDL_RenderFillRect(renderer, &hpFill);
+                float hpPct = std::clamp(stats.hp / stats.maxHp, 0.0f, 1.0f);
+                SDL_FRect hpFill{20.0f, 20.0f, 200.0f * hpPct, 20.0f};
+                SDL_SetRenderDrawColor(renderer, 220, 20, 60, 255);
+                SDL_RenderFillRect(renderer, &hpFill);
 
-            // MP Bar Background
-            SDL_FRect mpBg{20.0f, 45.0f, 150.0f, 15.0f};
-            SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
-            SDL_RenderFillRect(renderer, &mpBg);
+                // MP Bar
+                SDL_FRect mpBg{20.0f, 45.0f, 150.0f, 15.0f};
+                SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
+                SDL_RenderFillRect(renderer, &mpBg);
 
-            // MP Bar Fill (Blue)
-            float mpPct = std::clamp(stats.mp / stats.maxMp, 0.0f, 1.0f);
-            SDL_FRect mpFill{20.0f, 45.0f, 150.0f * mpPct, 15.0f};
-            SDL_SetRenderDrawColor(renderer, 30, 144, 255, 255);
-            SDL_RenderFillRect(renderer, &mpFill);
+                float mpPct = std::clamp(stats.mp / stats.maxMp, 0.0f, 1.0f);
+                SDL_FRect mpFill{20.0f, 45.0f, 150.0f * mpPct, 15.0f};
+                SDL_SetRenderDrawColor(renderer, 30, 144, 255, 255);
+                SDL_RenderFillRect(renderer, &mpFill);
 
-            // Text overlay using SDL_RenderDebugText
-            char hudText[64];
-            std::snprintf(hudText, sizeof(hudText), "HP: %.0f/%.0f  MP: %.0f/%.0f", stats.hp, stats.maxHp, stats.mp, stats.maxMp);
+                // HUD Text overlays
+                char hudText[128];
+                std::snprintf(hudText, sizeof(hudText), "LVL %d | HP: %.0f/%.0f | MP: %.0f/%.0f | SCORE: %d | COINS: %d",
+                    stats.level, stats.hp, stats.maxHp, stats.mp, stats.maxMp, player.score, player.coinsCollected);
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                SDL_RenderDebugText(renderer, 25.0f, 23.0f, hudText);
+            }
+
+            // Floating Damage Texts
+            floatingTextPool.forEachActive([renderer, &camera](const FloatingText& text) {
+                glm::vec2 screenPos = text.position - camera.position;
+                SDL_SetRenderDrawColor(
+                    renderer,
+                    static_cast<Uint8>(text.color.r * 255.0f),
+                    static_cast<Uint8>(text.color.g * 255.0f),
+                    static_cast<Uint8>(text.color.b * 255.0f),
+                    static_cast<Uint8>(text.color.a * 255.0f)
+                );
+                SDL_RenderDebugText(renderer, screenPos.x, screenPos.y, text.textBuffer);
+            });
+        } else if (gameState == GameState::MainMenu) {
+            // Main Menu Overlay
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+            SDL_FRect overlay{0.0f, 0.0f, 1280.0f, 720.0f};
+            SDL_RenderFillRect(renderer, &overlay);
+
+            SDL_SetRenderDrawColor(renderer, 255, 215, 0, 255);
+            SDL_RenderDebugText(renderer, 480.0f, 250.0f, "SIRPG 2D SIDE-SCROLLER RPG");
+
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-            SDL_RenderDebugText(renderer, 25.0f, 23.0f, hudText);
-        }
+            SDL_RenderDebugText(renderer, 440.0f, 320.0f, "CONTROLS:");
+            SDL_RenderDebugText(renderer, 440.0f, 350.0f, "- MOVE: A / D or ARROWS");
+            SDL_RenderDebugText(renderer, 440.0f, 380.0f, "- JUMP: SPACE or W (DOUBLE JUMP)");
+            SDL_RenderDebugText(renderer, 440.0f, 410.0f, "- MELEE SWORD: J or Z");
+            SDL_RenderDebugText(renderer, 440.0f, 440.0f, "- RANGED FIREBALL: K or X (10 MP)");
 
-        // Floating Damage Texts
-        floatingTextPool.forEachActive([renderer, &camera](const FloatingText& text) {
-            glm::vec2 screenPos = text.position - camera.position;
-            SDL_SetRenderDrawColor(
-                renderer,
-                static_cast<Uint8>(text.color.r * 255.0f),
-                static_cast<Uint8>(text.color.g * 255.0f),
-                static_cast<Uint8>(text.color.b * 255.0f),
-                static_cast<Uint8>(text.color.a * 255.0f)
-            );
-            SDL_RenderDebugText(renderer, screenPos.x, screenPos.y, text.textBuffer);
-        });
+            SDL_SetRenderDrawColor(renderer, 50, 205, 50, 255);
+            SDL_RenderDebugText(renderer, 450.0f, 520.0f, "PRESS ENTER OR SPACE TO START GAME");
+        } else if (gameState == GameState::GameOver) {
+            SDL_SetRenderDrawColor(renderer, 50, 0, 0, 200);
+            SDL_FRect overlay{0.0f, 0.0f, 1280.0f, 720.0f};
+            SDL_RenderFillRect(renderer, &overlay);
+
+            SDL_SetRenderDrawColor(renderer, 255, 30, 30, 255);
+            SDL_RenderDebugText(renderer, 560.0f, 300.0f, "GAME OVER");
+
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer, 480.0f, 360.0f, "PRESS 'R' OR SPACE TO RESTART");
+        } else if (gameState == GameState::Victory) {
+            SDL_SetRenderDrawColor(renderer, 0, 50, 20, 200);
+            SDL_FRect overlay{0.0f, 0.0f, 1280.0f, 720.0f};
+            SDL_RenderFillRect(renderer, &overlay);
+
+            SDL_SetRenderDrawColor(renderer, 50, 255, 50, 255);
+            SDL_RenderDebugText(renderer, 530.0f, 300.0f, "VICTORY ACHIEVED!");
+
+            SDL_SetRenderDrawColor(renderer, 255, 215, 0, 255);
+            SDL_RenderDebugText(renderer, 460.0f, 350.0f, "YOU REACHED THE END OF THE MAP!");
+
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer, 480.0f, 410.0f, "PRESS 'R' OR SPACE TO PLAY AGAIN");
+        }
 
         SDL_RenderPresent(renderer);
     }

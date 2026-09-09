@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 #include <vector>
 #include <cstdint>
+#include <cmath>
 #include <expected>
 #include "../Core/Logger.hpp"
 
@@ -43,7 +44,6 @@ public:
 
         auto setPixel = [pixels, pitchPixels, width, height](int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
             if (x >= 0 && x < width && y >= 0 && y < height) {
-                // RGBA8888 byte packing (R, G, B, A in system endianness or SDL_MapRGBA)
                 uint32_t color = (r << 24) | (g << 16) | (b << 8) | a;
                 pixels[y * pitchPixels + x] = color;
             }
@@ -91,13 +91,9 @@ public:
         for (int f = 0; f < 4; ++f) {
             int px = f * 32;
             int py = 32;
-            // Body (Blue Armor)
             drawRect(px + 10, py + 8, 12, 16, 30, 144, 255);
-            // Head (Helmet)
             drawRect(px + 11, py + 2, 10, 8, 192, 192, 192);
-            // Visor
             drawRect(px + 13, py + 5, 6, 2, 10, 10, 10);
-            // Legs
             drawRect(px + 10, py + 24, 4, 8, 50, 50, 50);
             drawRect(px + 18, py + 24, 4, 8, 50, 50, 50);
         }
@@ -106,33 +102,26 @@ public:
         for (int f = 0; f < 4; ++f) {
             int px = f * 32;
             int py = 64;
-            // Body
             drawRect(px + 10, py + 8, 12, 16, 30, 144, 255);
             drawRect(px + 11, py + 2, 10, 8, 192, 192, 192);
             drawRect(px + 10, py + 24, 5, 8, 50, 50, 50);
             drawRect(px + 17, py + 24, 5, 8, 50, 50, 50);
-            // Sword Swing Arc
             int swordX = px + 22 + f * 2;
             int swordY = py + 4 + (3 - f) * 3;
-            drawRect(swordX, swordY, 10, 4, 240, 240, 255); // Glowing blade
-            drawRect(swordX - 2, swordY + 1, 3, 2, 139, 69, 19); // Hilt
+            drawRect(swordX, swordY, 10, 4, 240, 240, 255);
+            drawRect(swordX - 2, swordY + 1, 3, 2, 139, 69, 19);
         }
 
         // 6. Skeleton Sprites (y=96, 4 frames 32x32)
         for (int f = 0; f < 4; ++f) {
             int px = f * 32;
             int py = 96;
-            // Bone white body
             drawRect(px + 11, py + 10, 10, 14, 220, 220, 210);
-            // Skull
             drawRect(px + 10, py + 2, 12, 8, 240, 240, 230);
-            // Eye sockets
             drawRect(px + 12, py + 5, 2, 2, 10, 10, 10);
             drawRect(px + 17, py + 5, 2, 2, 10, 10, 10);
-            // Ribs detail
             drawRect(px + 12, py + 12, 8, 2, 50, 50, 50);
             drawRect(px + 12, py + 16, 8, 2, 50, 50, 50);
-            // Legs
             drawRect(px + 11, py + 24, 3, 8, 200, 200, 190);
             drawRect(px + 18, py + 24, 3, 8, 200, 200, 190);
         }
@@ -141,19 +130,16 @@ public:
         for (int f = 0; f < 4; ++f) {
             int px = f * 32;
             int py = 128;
-            // Purple Robe
             drawRect(px + 8, py + 10, 16, 20, 128, 0, 128);
-            // Hood & face shadow
             drawRect(px + 9, py + 2, 14, 10, 75, 0, 130);
-            drawRect(px + 12, py + 6, 8, 4, 20, 20, 20); // Dark cowl
-            drawRect(px + 13, py + 7, 2, 2, 255, 215, 0); // Glowing yellow eye
+            drawRect(px + 12, py + 6, 8, 4, 20, 20, 20);
+            drawRect(px + 13, py + 7, 2, 2, 255, 215, 0);
             drawRect(px + 17, py + 7, 2, 2, 255, 215, 0);
-            // Staff
             drawRect(px + 25, py + 4, 3, 26, 139, 69, 19);
-            drawRect(px + 24, py + 2, 5, 5, 147, 112, 219); // Orb atop staff
+            drawRect(px + 24, py + 2, 5, 5, 147, 112, 219);
         }
 
-        // 8. Projectiles & Effects (y=160)
+        // 8. Projectiles & Collectibles (y=160)
         // Fireball (160, 160, 32, 32)
         for (int r = 14; r >= 0; --r) {
             uint8_t colorR = 255;
@@ -180,6 +166,30 @@ public:
                     }
                 }
             }
+        }
+
+        // Gold Coin (224, 160, 32, 32)
+        for (int r = 10; r >= 0; --r) {
+            uint8_t cr = 255;
+            uint8_t cg = static_cast<uint8_t>(215 - r * 10);
+            uint8_t cb = 0;
+            for (int y = -r; y <= r; ++y) {
+                for (int x = -r; x <= r; ++x) {
+                    if (x * x + y * y <= r * r) {
+                        setPixel(224 + 16 + x, 160 + 16 + y, cr, cg, cb, 255);
+                    }
+                }
+            }
+        }
+
+        // Health Potion Bottle (256, 160, 32, 32)
+        drawRect(256 + 12, 160 + 6, 8, 4, 180, 180, 180); // Cork/neck
+        drawRect(256 + 8, 160 + 10, 16, 16, 220, 20, 60);  // Red liquid vial
+
+        // Gem (288, 160, 32, 32)
+        for (int i = 0; i < 12; ++i) {
+            drawRect(288 + 16 - i, 160 + 8 + i, i * 2 + 1, 1, 0, 255, 255); // Cyan diamond
+            drawRect(288 + 16 - i, 160 + 24 - i, i * 2 + 1, 1, 0, 200, 255);
         }
 
         // 9. Parallax Background Textures (y=256 to 512)
