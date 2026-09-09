@@ -92,15 +92,15 @@ int main(int argc, char* argv[]) {
     GameState gameState = GameState::Playing;
 
     // =========================================================================
-    // MAP & ENTITY INITIALIZATION (100x20 Tilemap World)
+    // MULTI-LAYERED PROCEDURAL MAP GENERATION (100x20 Tilemap World)
     // =========================================================================
     constexpr int mapWidth = 100;
     constexpr int mapHeight = 20;
     constexpr float tileSize = 32.0f;
 
-    // 1. Create Parallax Background Entities
+    // 1. Create Parallax Sky & Mountain Layers
     auto bgEntity1 = registry.create();
-    registry.emplace<ParallaxComponent>(bgEntity1, ParallaxComponent{.scrollFactor = 0.2f, .baseOffset = glm::vec2(0.0f, 0.0f)});
+    registry.emplace<ParallaxComponent>(bgEntity1, ParallaxComponent{.scrollFactor = 0.15f, .baseOffset = glm::vec2(0.0f, 0.0f)});
     registry.emplace<SpriteComponent>(bgEntity1, SpriteComponent{
         .srcRect = SDL_FRect{0.0f, 256.0f, 256.0f, 128.0f},
         .color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
@@ -108,64 +108,104 @@ int main(int argc, char* argv[]) {
     });
 
     auto bgEntity2 = registry.create();
-    registry.emplace<ParallaxComponent>(bgEntity2, ParallaxComponent{.scrollFactor = 0.5f, .baseOffset = glm::vec2(0.0f, 0.0f)});
+    registry.emplace<ParallaxComponent>(bgEntity2, ParallaxComponent{.scrollFactor = 0.35f, .baseOffset = glm::vec2(0.0f, 0.0f)});
     registry.emplace<SpriteComponent>(bgEntity2, SpriteComponent{
         .srcRect = SDL_FRect{256.0f, 256.0f, 256.0f, 128.0f},
         .color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
         .zIndex = -9
     });
 
-    // 2. Build Procedural Tilemap Layer
+    // 2. Build Multi-Layered Tilemap World
     for (int y = 0; y < mapHeight; ++y) {
         for (int x = 0; x < mapWidth; ++x) {
-            int tileType = 0;
-
-            if (y >= 17) {
-                tileType = 1; // Dirt / Grass
-            } else if (y == 16 && (x % 12 >= 3 && x % 12 <= 7) && x > 5) {
-                tileType = 2; // Stone Platform
-            } else if (y == 16 && x == 25) {
-                tileType = 3; // Hazard Spikes
-            }
-
-            if (tileType == 0) continue;
-
-            auto tileEntity = registry.create();
             glm::vec2 pos(x * tileSize, y * tileSize);
 
-            registry.emplace<TransformComponent>(tileEntity, TransformComponent{.position = pos, .prevPosition = pos});
-            registry.emplace<TileComponent>(tileEntity, TileComponent{.tileType = tileType});
+            // Layer A: Background Ruin Brick Walls (Z-Index -5)
+            if (y >= 10 && y < 17 && (x % 6 == 0 || x % 6 == 1)) {
+                auto wallEntity = registry.create();
+                registry.emplace<TransformComponent>(wallEntity, TransformComponent{.position = pos, .prevPosition = pos});
+                registry.emplace<TileComponent>(wallEntity, TileComponent{.tileType = 4});
+                registry.emplace<SpriteComponent>(wallEntity, SpriteComponent{
+                    .srcRect = SDL_FRect{128.0f, 0.0f, 32.0f, 32.0f},
+                    .color = glm::vec4(0.7f, 0.7f, 0.8f, 1.0f),
+                    .zIndex = -5
+                });
+            }
 
-            SDL_FRect srcRect{0.0f, 0.0f, 32.0f, 32.0f};
-            if (tileType == 1) srcRect = SDL_FRect{32.0f, 0.0f, 32.0f, 32.0f};
-            else if (tileType == 2) srcRect = SDL_FRect{64.0f, 0.0f, 32.0f, 32.0f};
-            else if (tileType == 3) srcRect = SDL_FRect{96.0f, 0.0f, 32.0f, 32.0f};
+            // Layer B: Wall Torches (Z-Index -4)
+            if (y == 14 && (x % 12 == 6)) {
+                auto torchEntity = registry.create();
+                registry.emplace<TransformComponent>(torchEntity, TransformComponent{.position = pos, .prevPosition = pos});
+                registry.emplace<SpriteComponent>(torchEntity, SpriteComponent{
+                    .srcRect = SDL_FRect{192.0f, 0.0f, 32.0f, 32.0f},
+                    .color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+                    .zIndex = -4
+                });
+            }
 
-            registry.emplace<SpriteComponent>(tileEntity, SpriteComponent{
-                .srcRect = srcRect,
-                .color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
-                .zIndex = 0
-            });
+            // Layer C: Main Physics Ground & Platforms (Z-Index 0)
+            int tileType = 0;
+            // Pits / Chasm at x=30 to x=33 and x=65 to x=68
+            bool isPit = (x >= 30 && x <= 33) || (x >= 65 && x <= 68);
 
-            if (tileType == 1 || tileType == 2) {
-                b2BodyDef bodyDef = b2DefaultBodyDef();
-                bodyDef.type = b2_staticBody;
-                bodyDef.position = (b2Vec2){(pos.x + 16.0f) / 32.0f, (pos.y + 16.0f) / 32.0f};
+            if (y >= 17 && !isPit) {
+                tileType = 1; // Rich Grass / Soil
+            } else if (y == 17 && isPit) {
+                tileType = 3; // Bottom Spikes hazard in pits
+            } else if (y == 16 && (x % 10 >= 2 && x % 10 <= 6) && x > 5) {
+                tileType = 2; // Ancient Mossy Stone Bricks
+            } else if (y == 13 && (x % 14 >= 4 && x % 14 <= 7) && x > 10) {
+                tileType = 5; // Wooden Bridge Planks Platform
+            }
 
-                b2BodyId bodyId = b2CreateBody(physicsWorld, &bodyDef);
+            if (tileType > 0) {
+                auto tileEntity = registry.create();
+                registry.emplace<TransformComponent>(tileEntity, TransformComponent{.position = pos, .prevPosition = pos});
+                registry.emplace<TileComponent>(tileEntity, TileComponent{.tileType = tileType});
 
-                b2Polygon box = b2MakeBox(0.5f, 0.5f);
-                b2ShapeDef shapeDef = b2DefaultShapeDef();
-                shapeDef.friction = 0.6f;
-                b2CreatePolygonShape(bodyId, &shapeDef, &box);
+                SDL_FRect srcRect{0.0f, 0.0f, 32.0f, 32.0f};
+                if (tileType == 1) srcRect = SDL_FRect{32.0f, 0.0f, 32.0f, 32.0f};
+                else if (tileType == 2) srcRect = SDL_FRect{64.0f, 0.0f, 32.0f, 32.0f};
+                else if (tileType == 3) srcRect = SDL_FRect{96.0f, 0.0f, 32.0f, 32.0f};
+                else if (tileType == 5) srcRect = SDL_FRect{160.0f, 0.0f, 32.0f, 32.0f};
 
-                registry.emplace<RigidBodyComponent>(tileEntity, RigidBodyComponent{.bodyId = bodyId});
+                registry.emplace<SpriteComponent>(tileEntity, SpriteComponent{
+                    .srcRect = srcRect,
+                    .color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+                    .zIndex = 0
+                });
+
+                if (tileType == 1 || tileType == 2 || tileType == 5) {
+                    b2BodyDef bodyDef = b2DefaultBodyDef();
+                    bodyDef.type = b2_staticBody;
+                    bodyDef.position = (b2Vec2){(pos.x + 16.0f) / 32.0f, (pos.y + 16.0f) / 32.0f};
+
+                    b2BodyId bodyId = b2CreateBody(physicsWorld, &bodyDef);
+
+                    b2Polygon box = b2MakeBox(0.5f, 0.5f);
+                    b2ShapeDef shapeDef = b2DefaultShapeDef();
+                    shapeDef.friction = 0.6f;
+                    b2CreatePolygonShape(bodyId, &shapeDef, &box);
+
+                    registry.emplace<RigidBodyComponent>(tileEntity, RigidBodyComponent{.bodyId = bodyId});
+                }
+            }
+
+            // Layer D: Foreground Hanging Vines (Z-Index 6)
+            if (y == 0 && (x % 5 == 1 || x % 5 == 3)) {
+                auto vineEntity = registry.create();
+                registry.emplace<TransformComponent>(vineEntity, TransformComponent{.position = pos, .prevPosition = pos});
+                registry.emplace<SpriteComponent>(vineEntity, SpriteComponent{
+                    .srcRect = SDL_FRect{224.0f, 0.0f, 32.0f, 32.0f},
+                    .color = glm::vec4(0.9f, 1.0f, 0.9f, 0.85f),
+                    .zIndex = 6
+                });
             }
         }
     }
 
     // 3. Create Collectible Items Across Map
-    for (int x = 10; x < 90; x += 4) {
+    for (int x = 8; x < 95; x += 3) {
         auto coinEntity = registry.create();
         glm::vec2 cPos(x * tileSize, 15.0f * tileSize);
 
@@ -175,11 +215,11 @@ int main(int argc, char* argv[]) {
         CollectibleType colType = CollectibleType::Coin;
         int value = 100;
 
-        if (x % 16 == 0) {
+        if (x % 15 == 0) {
             colType = CollectibleType::Gem;
             srcRect = SDL_FRect{288.0f, 160.0f, 32.0f, 32.0f};
             value = 500;
-        } else if (x % 24 == 0) {
+        } else if (x % 21 == 0) {
             colType = CollectibleType::HealthPotion;
             srcRect = SDL_FRect{256.0f, 160.0f, 32.0f, 32.0f};
             value = 0;
@@ -314,7 +354,7 @@ int main(int argc, char* argv[]) {
         registry.emplace<RigidBodyComponent>(enemyEntity, RigidBodyComponent{.bodyId = eBodyId});
     }
 
-    LOG_INFO("World initialized successfully: 100x20 Tilemap, Player, Collectibles, and Enemies created.");
+    LOG_INFO("Realistic Multi-Layered World initialized: 100x20 Tilemap, Background Ruins, Torches, Bridges, Pits, Collectibles, Player, and Enemies created.");
 
     // =========================================================================
     // MAIN GAME LOOP (Fixed Timestep 60Hz + Interpolation, Zero Allocations)
