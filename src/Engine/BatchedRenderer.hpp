@@ -23,7 +23,7 @@ struct RenderQuadCommand {
 
 class BatchedRenderer {
 public:
-    static constexpr std::size_t MAX_QUADS_PER_BATCH = 2048;
+    static constexpr std::size_t MAX_QUADS_PER_BATCH = 4096;
 
     BatchedRenderer() {
         m_quadBuffer.reserve(MAX_QUADS_PER_BATCH);
@@ -37,6 +37,13 @@ public:
         if (m_quadBuffer.size() < MAX_QUADS_PER_BATCH) {
             m_quadBuffer.push_back(quad);
         }
+    }
+
+    // C++23 std::span zero-copy batch submission
+    void submitQuads(std::span<const RenderQuadCommand> quads) noexcept {
+        std::size_t available = MAX_QUADS_PER_BATCH - m_quadBuffer.size();
+        std::size_t count = std::min(available, quads.size());
+        m_quadBuffer.insert(m_quadBuffer.end(), quads.begin(), quads.begin() + count);
     }
 
     void flush(SDL_Renderer* renderer, SDL_Texture* atlasTexture) noexcept {
@@ -75,6 +82,10 @@ public:
         }
 
         m_quadBuffer.clear();
+    }
+
+    [[nodiscard]] std::span<const RenderQuadCommand> getActiveBatch() const noexcept {
+        return std::span<const RenderQuadCommand>(m_quadBuffer);
     }
 
 private:

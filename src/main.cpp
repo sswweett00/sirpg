@@ -10,6 +10,7 @@
 #include "Core/ArenaAllocator.hpp"
 #include "Core/ObjectPool.hpp"
 #include "Core/TimeStep.hpp"
+#include "Core/Profiler.hpp"
 #include "Components/Components.hpp"
 #include "Engine/TextureAtlas.hpp"
 #include "Engine/BatchedRenderer.hpp"
@@ -58,12 +59,13 @@ int main(int argc, char* argv[]) {
 
     SDL_SetRenderVSync(renderer, 1);
 
-    // Arena Allocator for general engine pre-allocated memory (e.g. 16MB)
+    // Arena Allocator for general engine pre-allocated memory (16MB)
     ArenaAllocator engineArena(16 * 1024 * 1024);
     LOG_INFO("Engine Arena Allocator initialized with {} MB", engineArena.getCapacity() / (1024 * 1024));
 
-    // Object Pool for Zero Runtime Memory Allocations (Floating Damage Texts)
+    // Object Pools for Zero Runtime Memory Allocations (Floating Texts & Particles)
     ObjectPool<FloatingText, 128> floatingTextPool;
+    ObjectPool<Particle, 256> particlePool;
 
     // EnTT Registry
     entt::registry registry;
@@ -143,12 +145,11 @@ int main(int argc, char* argv[]) {
             if (tileType == 1 || tileType == 2) {
                 b2BodyDef bodyDef = b2DefaultBodyDef();
                 bodyDef.type = b2_staticBody;
-                // Box2D body center position in meters
                 bodyDef.position = (b2Vec2){(pos.x + 16.0f) / 32.0f, (pos.y + 16.0f) / 32.0f};
 
                 b2BodyId bodyId = b2CreateBody(physicsWorld, &bodyDef);
 
-                b2Polygon box = b2MakeBox(0.5f, 0.5f); // 1x1 meter tile box (16px half-width = 0.5m)
+                b2Polygon box = b2MakeBox(0.5f, 0.5f);
                 b2ShapeDef shapeDef = b2DefaultShapeDef();
                 shapeDef.friction = 0.6f;
                 b2CreatePolygonShape(bodyId, &shapeDef, &box);
@@ -195,14 +196,14 @@ int main(int argc, char* argv[]) {
         .moveSpeed = 220.0f
     });
 
-    // Box2D Dynamic Body for Player (Center position in meters)
+    // Box2D Dynamic Body for Player
     b2BodyDef playerBodyDef = b2DefaultBodyDef();
     playerBodyDef.type = b2_dynamicBody;
     playerBodyDef.position = (b2Vec2){(playerStartPos.x + 16.0f) / 32.0f, (playerStartPos.y + 16.0f) / 32.0f};
-    playerBodyDef.fixedRotation = true; // Prevent falling over
+    playerBodyDef.fixedRotation = true;
 
     b2BodyId playerBodyId = b2CreateBody(physicsWorld, &playerBodyDef);
-    b2Polygon playerCapsule = b2MakeBox(0.35f, 0.45f); // Half-widths in meters
+    b2Polygon playerCapsule = b2MakeBox(0.35f, 0.45f);
     b2ShapeDef playerShapeDef = b2DefaultShapeDef();
     playerShapeDef.friction = 0.2f;
     b2CreatePolygonShape(playerBodyId, &playerShapeDef, &playerCapsule);
@@ -290,6 +291,7 @@ int main(int argc, char* argv[]) {
     LOG_INFO("Entering zero-stutter main game loop...");
 
     while (!quit) {
+        SIRPG_PROFILE_FRAME();
         timeStep.tick();
 
         // 1. Process Input
@@ -299,10 +301,11 @@ int main(int argc, char* argv[]) {
         while (timeStep.checkStep()) {
             float fixedDT = timeStep.getFixedDeltaTime();
 
-            PlayerSystem::update(registry, fixedDT);
+            PlayerSystem::update(registry, fixedDT, particlePool);
             AISystem::update(registry, fixedDT, physicsWorld);
             PhysicsSystem::update(registry, physicsWorld, fixedDT);
-            CombatSystem::update(registry, fixedDT, floatingTextPool);
+            CombatSystem::update(registry, fixedDT, floatingTextPool, particlePool);
+            ParticleSystem::update(particlePool, fixedDT);
             AnimationSystem::update(registry, fixedDT);
         }
 
@@ -318,7 +321,8 @@ int main(int argc, char* argv[]) {
             textureAtlas,
             camera,
             timeStep.getAlpha(),
-            floatingTextPool
+            floatingTextPool,
+            particlePool
         );
 
         frameCounter++;

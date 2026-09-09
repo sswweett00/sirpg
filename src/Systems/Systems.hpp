@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <span>
 
 #include "../Components/Components.hpp"
 #include "../Core/ObjectPool.hpp"
 #include "../Core/Logger.hpp"
+#include "../Core/Profiler.hpp"
 #include "../Engine/BatchedRenderer.hpp"
 #include "../Engine/TextureAtlas.hpp"
 
@@ -40,6 +42,7 @@ inline void destroyEntitySafely(entt::registry& registry, entt::entity entity) {
 class InputSystem {
 public:
     static bool pollEvents(entt::registry& registry) {
+        SIRPG_PROFILE_ZONE();
         SDL_Event event;
         bool quit = false;
 
@@ -79,6 +82,7 @@ struct Camera {
     float smoothSpeed{5.0f};
 
     void update(const glm::vec2& targetPos, float deltaTime) {
+        SIRPG_PROFILE_ZONE();
         glm::vec2 desiredPos = targetPos - viewportSize * 0.5f;
 
         // Smooth Damp / Lerp
@@ -102,6 +106,7 @@ public:
     }
 
     static void update(entt::registry& registry, b2WorldId worldId, float deltaTime) {
+        SIRPG_PROFILE_ZONE();
         // Step Box2D v3 simulation
         int subStepCount = 4;
         b2World_Step(worldId, deltaTime, subStepCount);
@@ -135,6 +140,7 @@ public:
 class AnimationSystem {
 public:
     static void update(entt::registry& registry, float deltaTime) {
+        SIRPG_PROFILE_ZONE();
         auto view = registry.view<AnimationComponent, SpriteComponent>();
         for (auto entity : view) {
             auto& anim = view.get<AnimationComponent>(entity);
@@ -167,11 +173,58 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 5. AI SYSTEM
+// 5. PARTICLE SYSTEM (Zero-Allocation Visual FX Pool)
+// -----------------------------------------------------------------------------
+class ParticleSystem {
+public:
+    static void update(
+        sirpg::core::ObjectPool<Particle, 256>& particlePool,
+        float deltaTime
+    ) {
+        SIRPG_PROFILE_ZONE();
+        particlePool.forEachActive([deltaTime, &particlePool](Particle& p) {
+            p.elapsedTime += deltaTime;
+            p.position += p.velocity * deltaTime;
+            p.color.a = 1.0f - (p.elapsedTime / p.lifetime);
+
+            if (p.elapsedTime >= p.lifetime) {
+                particlePool.recycle(&p);
+            }
+        });
+    }
+
+    static void spawnBurst(
+        sirpg::core::ObjectPool<Particle, 256>& particlePool,
+        const glm::vec2& origin,
+        const glm::vec4& color,
+        int count = 8
+    ) {
+        for (int i = 0; i < count; ++i) {
+            auto pRes = particlePool.spawn();
+            if (pRes) {
+                Particle* p = pRes.value();
+                float angle = static_cast<float>(i) * (2.0f * 3.14159f / static_cast<float>(count));
+                float speed = 80.0f + static_cast<float>(i * 15 % 50);
+
+                p->position = origin;
+                p->velocity = glm::vec2(std::cos(angle) * speed, std::sin(angle) * speed);
+                p->size = glm::vec2(6.0f, 6.0f);
+                p->color = color;
+                p->lifetime = 0.4f;
+                p->elapsedTime = 0.0f;
+                p->srcRect = SDL_FRect{160.0f, 160.0f, 16.0f, 16.0f};
+            }
+        }
+    }
+};
+
+// -----------------------------------------------------------------------------
+// 6. AI SYSTEM
 // -----------------------------------------------------------------------------
 class AISystem {
 public:
     static void update(entt::registry& registry, float deltaTime, b2WorldId worldId) {
+        SIRPG_PROFILE_ZONE();
         (void)worldId;
         // Find player position
         glm::vec2 playerPos{0.0f, 0.0f};
@@ -187,8 +240,6 @@ public:
             auto& transform = enemyView.get<TransformComponent>(entity);
             auto& rb = enemyView.get<RigidBodyComponent>(entity);
             auto& sprite = enemyView.get<SpriteComponent>(entity);
-            auto& anim = enemyView.get<AnimationComponent>(entity);
-            (void)anim;
 
             if (enemy.state == AIState::Dead) continue;
 
@@ -284,15 +335,18 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 6. COMBAT & PROJECTILE SYSTEM
+// 7. COMBAT & PROJECTILE SYSTEM
 // -----------------------------------------------------------------------------
 class CombatSystem {
 public:
     static void update(
         entt::registry& registry,
         float deltaTime,
-        sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool
+        sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool,
+        sirpg::core::ObjectPool<Particle, 256>& particlePool
     ) {
+        SIRPG_PROFILE_ZONE();
+
         // Update Floating Damage Texts
         floatingTextPool.forEachActive([deltaTime, &floatingTextPool](FloatingText& text) {
             text.elapsedTime += deltaTime;
@@ -334,6 +388,9 @@ public:
                     if (dist < 28.0f) { // Collision hit
                         eStats.hp -= proj.damage;
 
+                        // Particle burst on magic hit
+                        ParticleSystem::spawnBurst(particlePool, eTransform.position, glm::vec4(1.0f, 0.7f, 0.1f, 1.0f), 10);
+
                         // Spawn floating damage text from pool
                         auto textRes = floatingTextPool.spawn();
                         if (textRes) {
@@ -365,6 +422,9 @@ public:
                     float dist = glm::distance(transform.position, pTransform.position);
                     if (dist < 24.0f) {
                         pStats.hp = std::max(0.0f, pStats.hp - proj.damage);
+
+                        // Particle burst on player hit
+                        ParticleSystem::spawnBurst(particlePool, pTransform.position, glm::vec4(0.8f, 0.1f, 0.8f, 1.0f), 8);
 
                         // Floating damage text
                         auto textRes = floatingTextPool.spawn();
@@ -405,6 +465,9 @@ public:
                         eStats.hp -= hitbox.damage;
                         hitbox.active = false; // Only hit once per attack
 
+                        // Particle burst on melee hit
+                        ParticleSystem::spawnBurst(particlePool, eTransform.position, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f), 6);
+
                         auto textRes = floatingTextPool.spawn();
                         if (textRes) {
                             FloatingText* text = textRes.value();
@@ -434,6 +497,8 @@ public:
                         pStats.hp = std::max(0.0f, pStats.hp - hitbox.damage);
                         hitbox.active = false;
 
+                        ParticleSystem::spawnBurst(particlePool, pTransform.position, glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), 8);
+
                         auto textRes = floatingTextPool.spawn();
                         if (textRes) {
                             FloatingText* text = textRes.value();
@@ -461,11 +526,16 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// 7. PLAYER CONTROLLER SYSTEM
+// 8. PLAYER CONTROLLER SYSTEM
 // -----------------------------------------------------------------------------
 class PlayerSystem {
 public:
-    static void update(entt::registry& registry, float deltaTime) {
+    static void update(
+        entt::registry& registry,
+        float deltaTime,
+        sirpg::core::ObjectPool<Particle, 256>& particlePool
+    ) {
+        SIRPG_PROFILE_ZONE();
         auto view = registry.view<PlayerComponent, TransformComponent, RigidBodyComponent, StatsComponent, SpriteComponent, AnimationComponent>();
 
         for (auto entity : view) {
@@ -506,6 +576,9 @@ public:
             if (player.wantJump && !prevJumpState && player.jumpsRemaining > 0) {
                 currentVel.y = -12.0f; // Impulse upward velocity
                 player.jumpsRemaining--;
+
+                // Jump Dust Particles
+                ParticleSystem::spawnBurst(particlePool, transform.position + glm::vec2(16.0f, 32.0f), glm::vec4(0.8f, 0.8f, 0.8f, 0.8f), 6);
             }
             prevJumpState = player.wantJump;
 
@@ -556,13 +629,15 @@ public:
                     .elapsedTime = 0.0f,
                     .isFromPlayer = true
                 });
+
+                ParticleSystem::spawnBurst(particlePool, transform.position + glm::vec2(projDir * 24.0f, 16.0f), glm::vec4(1.0f, 0.5f, 0.0f, 1.0f), 8);
             }
         }
     }
 };
 
 // -----------------------------------------------------------------------------
-// 8. RENDER SYSTEM
+// 9. RENDER SYSTEM
 // -----------------------------------------------------------------------------
 class RenderSystem {
 public:
@@ -573,8 +648,10 @@ public:
         TextureAtlas& textureAtlas,
         const Camera& camera,
         float interpolationAlpha,
-        sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool
+        sirpg::core::ObjectPool<FloatingText, 128>& floatingTextPool,
+        sirpg::core::ObjectPool<Particle, 256>& particlePool
     ) {
+        SIRPG_PROFILE_ZONE();
         SDL_SetRenderDrawColor(renderer, 15, 15, 30, 255); // Dark blue night background
         SDL_RenderClear(renderer);
 
@@ -656,10 +733,22 @@ public:
             });
         }
 
+        // 4. Render Active FX Particles
+        particlePool.forEachActive([&batchedRenderer, &camera](const Particle& p) {
+            glm::vec2 screenPos = p.position - camera.position;
+            batchedRenderer.submitQuad(RenderQuadCommand{
+                .srcRect = p.srcRect,
+                .dstRect = SDL_FRect{screenPos.x, screenPos.y, p.size.x, p.size.y},
+                .color = p.color,
+                .rotation = 0.0f,
+                .zIndex = 10
+            });
+        });
+
         // Flush Batched Quads to GPU
         batchedRenderer.flush(renderer, textureAtlas.getTexture());
 
-        // 4. Render UI / HUD (HP / MP Bars & Floating Damage Numbers)
+        // 5. Render UI / HUD (HP / MP Bars & Floating Damage Numbers)
         // Find Player Stats
         auto playerView = registry.view<PlayerComponent, StatsComponent>();
         for (auto pEntity : playerView) {

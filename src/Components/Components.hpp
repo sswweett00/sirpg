@@ -4,6 +4,7 @@
 #include <glm/glm.hpp>
 #include <SDL3/SDL.h>
 #include <box2d/id.h>
+#include <span>
 
 namespace sirpg::components {
 
@@ -161,6 +162,17 @@ struct FloatingText {
     float elapsedTime{0.0f};
     bool active{false};
     char textBuffer[32]{};
+};
+
+// 15. Particle Pool Structure for FX (Zero-Allocation Particles)
+struct Particle {
+    glm::vec2 position{0.0f, 0.0f};
+    glm::vec2 velocity{0.0f, 0.0f};
+    glm::vec2 size{8.0f, 8.0f};
+    glm::vec4 color{1.0f, 1.0f, 1.0f, 1.0f};
+    float lifetime{0.5f};
+    float elapsedTime{0.0f};
+    SDL_FRect srcRect{160.0f, 160.0f, 16.0f, 16.0f};
 };
 
 } // namespace sirpg::components
